@@ -3,6 +3,7 @@
 #include <NTPClient.h>
 #include <FastLED.h>
 #include <TimeLib.h>          // Include the Time library
+#include <Timezone.h>         // Include the Timezone library
 #include "arduino_secrets.h"  // Contains your Wi-Fi credentials
 
 #define LED_PIN       6
@@ -17,9 +18,10 @@ CRGB leds[NUM_LEDS];
 char ssid[] = SECRET_SSID;
 char pass[] = SECRET_PASS;
 
-// Timezone offset for your local time zone (adjust as needed)
-// For California, use UTC-8 for PST and UTC-7 for PDT
-const long utcOffsetInSeconds = -8 * 3600; // PST (Standard Time)
+// Timezone rules for Pacific Time (USA)
+TimeChangeRule PDT = {"PDT", Second, Sun, Mar, 2, -420};  // Daylight time = UTC - 7 hours
+TimeChangeRule PST = {"PST", First, Sun, Nov, 2, -480};   // Standard time = UTC - 8 hours
+Timezone tz(PDT, PST);
 
 // NTP client to get time
 WiFiUDP ntpUDP;
@@ -31,13 +33,22 @@ WiFiServer server(80);
 // Zigzag XY mapping function for the 8x32 matrix
 uint16_t XY(uint8_t x, uint8_t y) {
   if (x >= MATRIX_WIDTH || y >= MATRIX_HEIGHT) {
-    return 0; // Safe default value
+    return NUM_LEDS; // Return invalid index
   }
   // Even columns light top to bottom, odd columns light bottom to top
   if (x % 2 == 0) {
     return (x * MATRIX_HEIGHT) + y;
   } else {
     return (x * MATRIX_HEIGHT) + (MATRIX_HEIGHT - 1 - y);
+  }
+}
+
+// Helper function to set pixels safely
+void setPixel(uint8_t x, uint8_t y, CRGB color, uint8_t brightness = 255) {
+  uint16_t index = XY(x, y);
+  if (index < NUM_LEDS) {
+    leds[index] = color;
+    leds[index].nscale8_video(brightness);
   }
 }
 
@@ -89,7 +100,7 @@ const uint8_t PROGMEM J_shape[8][6] = {
   {0,1,1,1,0,0},
 };
 
-// HTML content stored in PROGMEM (declare before use)
+// HTML content stored in PROGMEM
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML>
 <html>
@@ -125,6 +136,9 @@ uint8_t globalSaturation = 255; // Saturation for the display color
 uint8_t globalBrightness = 50;  // Brightness level (0-255)
 CRGB globalColor = CRGB::White; // Default color
 
+// Fire color palette for the shooting star
+CRGBPalette16 firePalette = HeatColors_p;
+
 // Function prototypes
 void displayDigit(int digit, int xOffset, int yOffset, CRGB color);
 void displayColon(int xOffset, int yOffset, bool showColon, CRGB color);
@@ -137,17 +151,18 @@ void setupLEDs();
 void handleClient();
 bool drawShootingStar();
 void updateTime();
-bool isDST(unsigned long epochTime);
 void displayClock();
 bool shouldUpdateClock();
 bool shouldUpdateShapes();
 void sendHTMLContent(WiFiClient &client, const char *data);
+CRGB getShapeColor();
 
 void setup() {
   Serial.begin(115200);
   setupLEDs();
   setupWiFi();
   timeClient.begin();
+  timeClient.update(); // Force initial update
   server.begin();
   Serial.println(F("HTTP server started"));
   Serial.print(F("Access the LED Matrix at: http://"));
@@ -224,6 +239,7 @@ void handleClient() {
             if (colorParam != NULL) {
               char colorValueStr[7] = {0};
               strncpy(colorValueStr, colorParam + 6, 6);
+              colorValueStr[6] = '\0'; // Ensure null-terminated
               uint32_t colorValue = strtoul(colorValueStr, NULL, 16);
               uint8_t r = (colorValue >> 16) & 0xFF;
               uint8_t g = (colorValue >> 8) & 0xFF;
@@ -279,22 +295,17 @@ void updateTime() {
   static unsigned long lastNTPUpdate = 0;
   unsigned long currentMillis = millis();
 
-  if (currentMillis - lastNTPUpdate >= 600000) { // Update every 10 minutes
+  if ((currentMillis - lastNTPUpdate >= 600000) || lastNTPUpdate == 0) { // Update every 10 minutes or on startup
     lastNTPUpdate = currentMillis;
     updateNTPTime();
   }
 }
 
 void displayClock() {
-  unsigned long epochTime = timeClient.getEpochTime();
+  time_t epochTime = timeClient.getEpochTime();
 
-  // Adjust for UTC offset
-  time_t localTime = epochTime + utcOffsetInSeconds;
-
-  // Adjust for DST if applicable
-  if (isDST(localTime)) {
-    localTime += 3600; // Add one hour for DST
-  }
+  // Convert UTC to local time
+  time_t localTime = tz.toLocal(epochTime);
 
   // Break down time into components
   tmElements_t tm;
@@ -311,46 +322,6 @@ void displayClock() {
   displayTime(hour, minute, second % 2 == 0, color);
 }
 
-bool isDST(unsigned long epochTime) {
-  // Adjust for local time zone
-  time_t localTime = epochTime + utcOffsetInSeconds;
-  tmElements_t tm;
-  breakTime(localTime, tm);
-
-  int day = tm.Day;
-  int month = tm.Month;
-  int year = tmYearToCalendar(tm.Year); // Convert from offset to full year
-  int hour = tm.Hour;
-  int wday = tm.Wday; // Day of week (Sunday=1, Saturday=7)
-
-  // DST starts at 2 AM on the second Sunday in March
-  // DST ends at 2 AM on the first Sunday in November
-
-  // Calculate the second Sunday in March
-  int marchDay = 14 - ((1 + year * 5 / 4) % 7);
-  // Calculate the first Sunday in November
-  int novemberDay = 7 - ((1 + year * 5 / 4) % 7);
-
-  if (month < 3 || month > 11) {
-    return false; // Not DST
-  } else if (month > 3 && month < 11) {
-    return true; // DST
-  } else if (month == 3) {
-    if (day > marchDay || (day == marchDay && hour >= 2)) {
-      return true; // DST
-    } else {
-      return false; // Not DST
-    }
-  } else if (month == 11) {
-    if (day < novemberDay || (day == novemberDay && hour < 2)) {
-      return true; // DST
-    } else {
-      return false; // Not DST
-    }
-  }
-  return false; // Default
-}
-
 void drawShapes() {
   static uint8_t shapeIndex = 0;
   static unsigned long lastShapeChange = 0;
@@ -358,19 +329,19 @@ void drawShapes() {
   unsigned long currentMillis = millis();
 
   if (currentMillis - lastShapeChange >= shapeInterval) {
+    // Clear previous shape area
+    for (int row = 0; row < 8; row++) {
+      for (int col = 26; col < 32; col++) {
+        setPixel(col, row, CRGB::Black);
+      }
+    }
+
     lastShapeChange = currentMillis;
     shapeIndex = (shapeIndex + 1) % 3; // Cycle through shapes
   }
 
-  // Clear previous shape area
-  for (int row = 0; row < 8; row++) {
-    for (int col = 26; col < 32; col++) {
-      leds[XY(col, row)] = CRGB::Black;
-    }
-  }
-
-  // Use globalColor for shapes
-  CRGB color = globalColor;
+  // Use dynamic color for shapes
+  CRGB color = getShapeColor();
 
   switch (shapeIndex) {
     case 0:
@@ -385,31 +356,47 @@ void drawShapes() {
   }
 }
 
+CRGB getShapeColor() {
+  static uint8_t hue = 0;
+  hue += 2; // Adjust the increment to control the speed of the fade
+  return CHSV(hue, 255, 255); // Set brightness (value) to maximum
+}
+
 bool drawShootingStar() {
   static unsigned long previousMillis = 0;   // Stores last time shooting star was updated
-  static int position = MATRIX_WIDTH;        // Start from the right edge
+  static float position = -5.0;              // Start from left outside the matrix
+  const float speed = 0.5;                   // Adjust speed as needed
   const int interval = 50;                   // Time between steps in milliseconds
   bool updated = false;
   unsigned long currentMillis = millis();
 
-  // Fade the tail to create trailing effect
-  fadeToBlackBy(leds, NUM_LEDS, 64);
+  // Fade only the area of the shooting star
+  for (int i = 0; i < MATRIX_WIDTH; i++) {
+    CRGB pixelColor = leds[XY(i, 7)];
+    pixelColor.nscale8(200); // Fade by a factor
+    leds[XY(i, 7)] = pixelColor;
+  }
 
   if (currentMillis - previousMillis >= interval) {
     previousMillis = currentMillis;
 
-    // Clear previous position
+    position += speed;
+
     if (position < MATRIX_WIDTH) {
-      leds[XY(position, 7)] = CRGB::Black;
-    }
-
-    position--;
-
-    if (position >= 0) {
-      leds[XY(position, 7)] = CRGB::White;
+      int pos = (int)position;
+      // Create a trail with decreasing brightness and changing colors
+      for (int i = 0; i < 5; i++) { // Adjust the length of the trail
+        int trailPos = pos - i;
+        if (trailPos >= 0 && trailPos < MATRIX_WIDTH) {
+          uint8_t colorIndex = map(i, 0, 4, 128, 255); // Adjust color index for palette
+          CRGB color = ColorFromPalette(firePalette, colorIndex);
+          color.nscale8(255 - (i * 50)); // Decrease brightness for the trail
+          setPixel(trailPos, 7, color);
+        }
+      }
       updated = true;
     } else {
-      position = MATRIX_WIDTH + random(10, 100); // Random delay before next shooting star
+      position = -5.0; // Reset position for next shooting star
     }
   }
   return updated;
@@ -422,7 +409,7 @@ void writeShape(int start_col, const uint8_t shape[8][6], CRGB color) {
       if (pixel) {
         int matrix_col = start_col + col;
         if (matrix_col < MATRIX_WIDTH) {
-          leds[XY(matrix_col, row)] = color;
+          setPixel(matrix_col, row, color, 255); // Set brightness to maximum
         }
       }
     }
@@ -434,22 +421,20 @@ void displayDigit(int digit, int xOffset, int yOffset, CRGB color) {
     uint8_t col = pgm_read_byte(&(digitBitmaps[digit][x]));
     for (uint8_t y = 0; y < 7; y++) {
       if (col & (1 << y)) {
-        leds[XY(x + xOffset, y + yOffset)] = color;
-      } else {
-        leds[XY(x + xOffset, y + yOffset)] = CRGB::Black;
+        setPixel(x + xOffset, y + yOffset, color);
       }
+      // Do not set pixels to black here to prevent blinking
     }
   }
 }
 
 void displayColon(int xOffset, int yOffset, bool showColon, CRGB color) {
-  // Clear colon area first
-  for (int y = yOffset; y < yOffset + 7; y++) {
-    leds[XY(xOffset, y)] = CRGB::Black;
-  }
   if (showColon) {
-    leds[XY(xOffset, yOffset + 2)] = color;  // Upper dot of colon
-    leds[XY(xOffset, yOffset + 4)] = color;  // Lower dot of colon
+    setPixel(xOffset, yOffset + 2, color);  // Upper dot of colon
+    setPixel(xOffset, yOffset + 4, color);  // Lower dot of colon
+  } else {
+    setPixel(xOffset, yOffset + 2, CRGB::Black);
+    setPixel(xOffset, yOffset + 4, CRGB::Black);
   }
 }
 
@@ -466,7 +451,6 @@ void displayTime(int hour, int minute, bool showColon, CRGB color) {
   int minuteTens = minute / 10;
   int minuteUnits = minute % 10;
 
-  // Clear previous digits by overwriting with black if necessary
   // Display digits with spacing
   if (hourTens > 0) {
     displayDigit(hourTens, 0, 0, color);
@@ -474,7 +458,7 @@ void displayTime(int hour, int minute, bool showColon, CRGB color) {
     // Clear leading zero if hour is single digit
     for (int x = 0; x < 5; x++) {
       for (int y = 0; y < 7; y++) {
-        leds[XY(x, y)] = CRGB::Black;
+        setPixel(x, y, CRGB::Black);
       }
     }
   }
@@ -495,11 +479,6 @@ bool shouldUpdateClock() {
 }
 
 bool shouldUpdateShapes() {
-  static unsigned long lastUpdate = 0;
-  unsigned long currentMillis = millis();
-  if (currentMillis - lastUpdate >= 3000) { // Update every 3 seconds
-    lastUpdate = currentMillis;
-    return true;
-  }
-  return false;
+  // We update shapes every time to allow for smooth color transitions
+  return true;
 }
