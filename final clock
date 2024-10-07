@@ -31,7 +31,7 @@ WiFiServer server(80);
 // Zigzag XY mapping function for the 8x32 matrix
 uint16_t XY(uint8_t x, uint8_t y) {
   if (x >= MATRIX_WIDTH || y >= MATRIX_HEIGHT) {
-    return NUM_LEDS; // Invalid index
+    return 0; // Safe default value
   }
   // Even columns light top to bottom, odd columns light bottom to top
   if (x % 2 == 0) {
@@ -41,7 +41,7 @@ uint16_t XY(uint8_t x, uint8_t y) {
   }
 }
 
-// 5x7 pixel digit bitmaps for time display
+// 5x7 pixel digit bitmaps for time display (stored in PROGMEM)
 const uint8_t PROGMEM digitBitmaps[10][5] = {
   {0x1F, 0x11, 0x11, 0x11, 0x1F}, // 0
   {0x00, 0x00, 0x00, 0x00, 0x1F}, // 1
@@ -55,8 +55,8 @@ const uint8_t PROGMEM digitBitmaps[10][5] = {
   {0x17, 0x15, 0x15, 0x15, 0x1F}  // 9
 };
 
-// Shape definitions
-const uint8_t R_shape[8][6] PROGMEM = {
+// Shape definitions (stored in PROGMEM)
+const uint8_t PROGMEM R_shape[8][6] = {
   {1,1,1,1,1,0},
   {1,0,0,0,0,1},
   {1,0,0,0,0,1},
@@ -67,7 +67,7 @@ const uint8_t R_shape[8][6] PROGMEM = {
   {1,0,0,0,0,1},
 };
 
-const uint8_t Heart_shape[8][6] PROGMEM = {
+const uint8_t PROGMEM Heart_shape[8][6] = {
   {0,1,0,0,1,0},
   {1,1,1,1,1,1},
   {1,1,1,1,1,1},
@@ -78,7 +78,7 @@ const uint8_t Heart_shape[8][6] PROGMEM = {
   {0,0,0,0,0,0},
 };
 
-const uint8_t J_shape[8][6] PROGMEM = {
+const uint8_t PROGMEM J_shape[8][6] = {
   {1,1,1,1,1,1},
   {0,0,0,0,0,1},
   {0,0,0,0,0,1},
@@ -96,7 +96,7 @@ const long interval = 1000; // Update interval for the clock display
 // User-controlled variables
 uint8_t globalHue = 0;          // Hue for the display color
 uint8_t globalSaturation = 255; // Saturation for the display color
-uint8_t globalBrightness = 100; // Brightness level (0-255)
+uint8_t globalBrightness = 50;  // Brightness level (0-255)
 CRGB globalColor = CRGB::White; // Default color
 
 // Function prototypes
@@ -109,10 +109,13 @@ void drawShapes();
 void setupWiFi();
 void setupLEDs();
 void handleClient();
-void drawShootingStar();
+bool drawShootingStar();
 void updateTime();
 bool isDST(unsigned long epochTime);
 void displayClock();
+bool shouldUpdateClock();
+bool shouldUpdateShapes();
+int freeMemory();
 
 void setup() {
   Serial.begin(115200);
@@ -120,25 +123,37 @@ void setup() {
   setupWiFi();
   timeClient.begin();
   server.begin();
-  Serial.println("HTTP server started");
-  Serial.print("Access the LED Matrix at: http://");
+  Serial.println(F("HTTP server started"));
+  Serial.print(F("Access the LED Matrix at: http://"));
   Serial.println(WiFi.localIP());
 }
 
 void loop() {
-  handleClient(); // Handle web server requests
+  bool displayUpdated = false;
 
-  updateTime(); // Update time if necessary
+  handleClient();
+  updateTime();
 
-  // Do not clear the display here to allow for trailing effects
-  // The clock and shapes will overwrite their display areas
-  displayClock();
+  // Update clock display
+  if (shouldUpdateClock()) {
+    displayClock();
+    displayUpdated = true;
+  }
 
-  drawShapes();
+  // Update shapes
+  if (shouldUpdateShapes()) {
+    drawShapes();
+    displayUpdated = true;
+  }
 
-  drawShootingStar();
+  // Update shooting star
+  if (drawShootingStar()) {
+    displayUpdated = true;
+  }
 
-  FastLED.show();
+  if (displayUpdated) {
+    FastLED.show();
+  }
 }
 
 void setupLEDs() {
@@ -147,129 +162,100 @@ void setupLEDs() {
 }
 
 void setupWiFi() {
-  Serial.println("Connecting to Wi-Fi...");
+  Serial.println(F("Connecting to Wi-Fi..."));
   WiFi.begin(ssid, pass);
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
-    Serial.print(".");
+    Serial.print(F("."));
   }
-  Serial.println("\nConnected!");
-  Serial.print("IP Address: ");
+  Serial.println(F("\nConnected!"));
+  Serial.print(F("IP Address: "));
   Serial.println(WiFi.localIP());
 }
 
 void handleClient() {
   WiFiClient client = server.available();
   if (client) {
-    Serial.println("New client connected");
-    String currentLine = "";
-    String httpRequest = "";
+    char httpRequest[500] = {0}; // Adjust size as needed
+    int index = 0;
+    unsigned long startTime = millis();
 
-    while (client.connected()) {
+    while (client.connected() && millis() - startTime < 1000) { // Timeout after 1 second
       if (client.available()) {
         char c = client.read();
-        httpRequest += c;
+        if (index < sizeof(httpRequest) - 1) {
+          httpRequest[index++] = c;
+        }
 
         if (c == '\n') {
-          if (currentLine.length() == 0) {
-            // End of headers
+          httpRequest[index] = '\0';
+          // Process the request here
+          if (strstr(httpRequest, "GET /") != NULL) {
             // Parse GET parameters
-            int colorIndex = httpRequest.indexOf("color=");
-            int brightnessIndex = httpRequest.indexOf("brightness=");
-            if (colorIndex != -1) {
-              int ampIndex = httpRequest.indexOf('&', colorIndex);
-              String colorValueStr;
-              if (ampIndex != -1) {
-                colorValueStr = httpRequest.substring(colorIndex + 6, ampIndex);
-              } else {
-                colorValueStr = httpRequest.substring(colorIndex + 6);
-              }
-              // URL decode if necessary
-              colorValueStr.replace("%23", ""); // Remove '%23' which is URL-encoded '#'
-              colorValueStr.replace("#", "");   // Remove '#' if it exists
+            char *colorParam = strstr(httpRequest, "color=");
+            char *brightnessParam = strstr(httpRequest, "brightness=");
 
-              // Convert hex color to RGB
-              uint32_t colorValue = (uint32_t) strtol(colorValueStr.c_str(), NULL, 16);
+            if (colorParam != NULL) {
+              char colorValueStr[7] = {0};
+              strncpy(colorValueStr, colorParam + 6, 6);
+              uint32_t colorValue = strtoul(colorValueStr, NULL, 16);
               uint8_t r = (colorValue >> 16) & 0xFF;
               uint8_t g = (colorValue >> 8) & 0xFF;
               uint8_t b = colorValue & 0xFF;
-
-              // Update globalColor
               globalColor = CRGB(r, g, b);
-
-              // Convert RGB to HSV
               CHSV hsv = rgb2hsv_approximate(globalColor);
               globalHue = hsv.hue;
               globalSaturation = hsv.sat;
-
-              Serial.print("Color updated to: ");
-              Serial.print("R: "); Serial.print(r);
-              Serial.print(" G: "); Serial.print(g);
-              Serial.print(" B: "); Serial.println(b);
             }
-            if (brightnessIndex != -1) {
-              int ampIndex = httpRequest.indexOf('&', brightnessIndex);
-              String brightnessValueStr;
-              if (ampIndex != -1) {
-                brightnessValueStr = httpRequest.substring(brightnessIndex + 11, ampIndex);
-              } else {
-                brightnessValueStr = httpRequest.substring(brightnessIndex + 11);
-              }
-              globalBrightness = constrain(brightnessValueStr.toInt(), 0, 255);
+
+            if (brightnessParam != NULL) {
+              int brightnessValue = atoi(brightnessParam + 11);
+              globalBrightness = constrain(brightnessValue, 0, 255);
               FastLED.setBrightness(globalBrightness);
-
-              Serial.print("Brightness updated to: ");
-              Serial.println(globalBrightness);
             }
-
-            // Send HTTP response
-            client.println("HTTP/1.1 200 OK");
-            client.println("Content-Type: text/html");
-            client.println("Connection: close");
-            client.println();
-
-            // HTML content
-            client.println("<!DOCTYPE HTML>");
-            client.println("<html>");
-            client.println("<head><meta name='viewport' content='width=device-width, initial-scale=1'>");
-            client.println("<style>");
-            client.println("body { font-family: Arial, sans-serif; text-align: center; background-color: #f0f0f0; }");
-            client.println("h1 { color: #333; }");
-            client.println("input[type='color'] { width: 100px; height: 50px; border: none; }");
-            client.println("input[type='range'] { width: 80%; }");
-            client.println("button { padding: 10px 20px; font-size: 16px; }");
-            client.println("</style>");
-            client.println("</head>");
-            client.println("<body>");
-            client.println("<h1>LED Matrix Control</h1>");
-            client.println("<form method='GET'>");
-
-            // Convert current color to hex string
-            char colorHex[7];
-            snprintf(colorHex, sizeof(colorHex), "%02X%02X%02X", globalColor.r, globalColor.g, globalColor.b);
-
-            client.println("<label for='color'>Select Color:</label><br>");
-            client.println("<input type='color' id='color' name='color' value='#" + String(colorHex) + "'><br><br>");
-            client.println("<label for='brightness'>Brightness:</label><br>");
-            client.println("<input type='range' id='brightness' name='brightness' min='0' max='255' value='" + String(globalBrightness) + "'><br><br>");
-            client.println("<button type='submit'>Update</button>");
-            client.println("</form>");
-            client.println("</body>");
-            client.println("</html>");
-            break;
-          } else {
-            currentLine = "";
           }
-        } else if (c != '\r') {
-          currentLine += c;
+
+          // Send HTTP response
+          client.println(F("HTTP/1.1 200 OK"));
+          client.println(F("Content-Type: text/html"));
+          client.println(F("Connection: close"));
+          client.println();
+
+          // Send HTML content from PROGMEM
+          client.write_P(index_html, strlen_P(index_html));
+          break;
         }
       }
     }
-    delay(1);
     client.stop();
-    Serial.println("Client disconnected");
   }
 }
+
+// HTML content stored in PROGMEM
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML>
+<html>
+<head><meta name='viewport' content='width=device-width, initial-scale=1'>
+<style>
+body { font-family: Arial, sans-serif; text-align: center; background-color: #f0f0f0; }
+h1 { color: #333; }
+input[type='color'] { width: 100px; height: 50px; border: none; }
+input[type='range'] { width: 80%; }
+button { padding: 10px 20px; font-size: 16px; }
+</style>
+</head>
+<body>
+<h1>LED Matrix Control</h1>
+<form method='GET'>
+<label for='color'>Select Color:</label><br>
+<input type='color' id='color' name='color' value='#FFFFFF'><br><br>
+<label for='brightness'>Brightness:</label><br>
+<input type='range' id='brightness' name='brightness' min='0' max='255' value='50'><br><br>
+<button type='submit'>Update</button>
+</form>
+</body>
+</html>
+)rawliteral";
 
 void updateNTPTime() {
   timeClient.update();
@@ -279,7 +265,7 @@ void updateTime() {
   static unsigned long lastNTPUpdate = 0;
   unsigned long currentMillis = millis();
 
-  if (currentMillis - lastNTPUpdate >= 60000) { // Update NTP every minute
+  if (currentMillis - lastNTPUpdate >= 600000) { // Update every 10 minutes
     lastNTPUpdate = currentMillis;
     updateNTPTime();
   }
@@ -327,9 +313,9 @@ bool isDST(unsigned long epochTime) {
   // DST ends at 2 AM on the first Sunday in November
 
   // Calculate the second Sunday in March
-  int marchDay = (14 - (1 + (year * 5 / 4)) % 7);
+  int marchDay = 14 - ((1 + year * 5 / 4) % 7);
   // Calculate the first Sunday in November
-  int novemberDay = (7 - (1 + (year * 5 / 4)) % 7);
+  int novemberDay = 7 - ((1 + year * 5 / 4) % 7);
 
   if (month < 3 || month > 11) {
     return false; // Not DST
@@ -385,38 +371,41 @@ void drawShapes() {
   }
 }
 
-void drawShootingStar() {
+bool drawShootingStar() {
   static unsigned long previousMillis = 0;   // Stores last time shooting star was updated
-  static int position = -20;                 // Current position of the shooting star
+  static int position = MATRIX_WIDTH;        // Start from the right edge
   const int interval = 50;                   // Time between steps in milliseconds
-  const uint8_t tail_fade_amount = 64;       // Fade amount for tail effect (0-255)
+  bool updated = false;
   unsigned long currentMillis = millis();
 
   // Fade the tail to create trailing effect
-  fadeToBlackBy(leds, NUM_LEDS, tail_fade_amount);
+  fadeToBlackBy(leds, NUM_LEDS, 64);
 
   if (currentMillis - previousMillis >= interval) {
     previousMillis = currentMillis;
 
-    if (position >= 0 && position < MATRIX_WIDTH) {
-      int x = position;
-      int y = 7; // Row 7 (bottom row)
-      leds[XY(x, y)] = CRGB::White;
+    // Clear previous position
+    if (position < MATRIX_WIDTH) {
+      leds[XY(position, 7)] = CRGB::Black;
+    }
 
-      position++;
+    position--;
+
+    if (position >= 0) {
+      leds[XY(position, 7)] = CRGB::White;
+      updated = true;
     } else {
-      position++;
-      if (position >= MATRIX_WIDTH + 20) {
-        position = -20; // Reset position to delay before next shooting star
-      }
+      position = MATRIX_WIDTH + random(10, 100); // Random delay before next shooting star
     }
   }
+  return updated;
 }
 
 void writeShape(int start_col, const uint8_t shape[8][6], CRGB color) {
   for (int row = 0; row < 8; row++) {
     for (int col = 0; col < 6; col++) {
-      if (pgm_read_byte(&(shape[row][col]))) {
+      uint8_t pixel = pgm_read_byte(&(shape[row][col]));
+      if (pixel) {
         int matrix_col = start_col + col;
         if (matrix_col < MATRIX_WIDTH) {
           leds[XY(matrix_col, row)] = color;
@@ -433,7 +422,6 @@ void displayDigit(int digit, int xOffset, int yOffset, CRGB color) {
       if (col & (1 << y)) {
         leds[XY(x + xOffset, y + yOffset)] = color;
       } else {
-        // Clear pixel if not part of the digit
         leds[XY(x + xOffset, y + yOffset)] = CRGB::Black;
       }
     }
@@ -480,4 +468,30 @@ void displayTime(int hour, int minute, bool showColon, CRGB color) {
   displayColon(12, 0, showColon, color);
   displayDigit(minuteTens, 14, 0, color);
   displayDigit(minuteUnits, 20, 0, color);
+}
+
+bool shouldUpdateClock() {
+  static unsigned long lastUpdate = 0;
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastUpdate >= 1000) { // Update every second
+    lastUpdate = currentMillis;
+    return true;
+  }
+  return false;
+}
+
+bool shouldUpdateShapes() {
+  static unsigned long lastUpdate = 0;
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastUpdate >= 3000) { // Update every 3 seconds
+    lastUpdate = currentMillis;
+    return true;
+  }
+  return false;
+}
+
+int freeMemory() {
+  extern int __heap_start, *__brkval;
+  int v;
+  return (int)&v - (__brkval == 0 ? (int)&__heap_start : (int)__brkval);
 }
