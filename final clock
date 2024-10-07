@@ -89,6 +89,32 @@ const uint8_t PROGMEM J_shape[8][6] = {
   {0,1,1,1,0,0},
 };
 
+// HTML content stored in PROGMEM (declare before use)
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML>
+<html>
+<head><meta name='viewport' content='width=device-width, initial-scale=1'>
+<style>
+body { font-family: Arial, sans-serif; text-align: center; background-color: #f0f0f0; }
+h1 { color: #333; }
+input[type='color'] { width: 100px; height: 50px; border: none; }
+input[type='range'] { width: 80%; }
+button { padding: 10px 20px; font-size: 16px; }
+</style>
+</head>
+<body>
+<h1>LED Matrix Control</h1>
+<form method='GET'>
+<label for='color'>Select Color:</label><br>
+<input type='color' id='color' name='color' value='#FFFFFF'><br><br>
+<label for='brightness'>Brightness:</label><br>
+<input type='range' id='brightness' name='brightness' min='0' max='255' value='50'><br><br>
+<button type='submit'>Update</button>
+</form>
+</body>
+</html>
+)rawliteral";
+
 // Time variables
 unsigned long previousMillis = 0;
 const long interval = 1000; // Update interval for the clock display
@@ -115,7 +141,7 @@ bool isDST(unsigned long epochTime);
 void displayClock();
 bool shouldUpdateClock();
 bool shouldUpdateShapes();
-int freeMemory();
+void sendHTMLContent(WiFiClient &client, const char *data);
 
 void setup() {
   Serial.begin(115200);
@@ -222,7 +248,8 @@ void handleClient() {
           client.println();
 
           // Send HTML content from PROGMEM
-          client.write_P(index_html, strlen_P(index_html));
+          sendHTMLContent(client, index_html);
+
           break;
         }
       }
@@ -231,31 +258,18 @@ void handleClient() {
   }
 }
 
-// HTML content stored in PROGMEM
-const char index_html[] PROGMEM = R"rawliteral(
-<!DOCTYPE HTML>
-<html>
-<head><meta name='viewport' content='width=device-width, initial-scale=1'>
-<style>
-body { font-family: Arial, sans-serif; text-align: center; background-color: #f0f0f0; }
-h1 { color: #333; }
-input[type='color'] { width: 100px; height: 50px; border: none; }
-input[type='range'] { width: 80%; }
-button { padding: 10px 20px; font-size: 16px; }
-</style>
-</head>
-<body>
-<h1>LED Matrix Control</h1>
-<form method='GET'>
-<label for='color'>Select Color:</label><br>
-<input type='color' id='color' name='color' value='#FFFFFF'><br><br>
-<label for='brightness'>Brightness:</label><br>
-<input type='range' id='brightness' name='brightness' min='0' max='255' value='50'><br><br>
-<button type='submit'>Update</button>
-</form>
-</body>
-</html>
-)rawliteral";
+void sendHTMLContent(WiFiClient &client, const char *data) {
+  char buffer[128]; // Adjust buffer size as needed
+  uint16_t index = 0;
+  uint16_t dataLength = strlen_P(data);
+  while (index < dataLength) {
+    uint16_t chunkSize = min((uint16_t)(sizeof(buffer) - 1), (uint16_t)(dataLength - index));
+    memcpy_P(buffer, data + index, chunkSize);
+    buffer[chunkSize] = '\0';
+    client.print(buffer);
+    index += chunkSize;
+  }
+}
 
 void updateNTPTime() {
   timeClient.update();
@@ -488,10 +502,4 @@ bool shouldUpdateShapes() {
     return true;
   }
   return false;
-}
-
-int freeMemory() {
-  extern int __heap_start, *__brkval;
-  int v;
-  return (int)&v - (__brkval == 0 ? (int)&__heap_start : (int)__brkval);
 }
