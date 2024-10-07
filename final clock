@@ -2,8 +2,8 @@
 #include <WiFiUdp.h>
 #include <NTPClient.h>
 #include <FastLED.h>
-#include <TimeLib.h>          // Include the Time library
-#include <Timezone.h>         // Include the Timezone library
+#include <TimeLib.h>
+#include <Timezone.h>
 #include "arduino_secrets.h"  // Contains your Wi-Fi credentials
 
 #define LED_PIN       6
@@ -13,6 +13,14 @@
 #define COLOR_ORDER   GRB
 
 CRGB leds[NUM_LEDS];
+
+// Heart color palette (shades of red and pink)
+DEFINE_GRADIENT_PALETTE(heart_gp) {
+  0,   255,  0,   0,    // Red
+  128, 255, 105, 180,   // Hot Pink
+  255, 255,  0,   0     // Red
+};
+CRGBPalette16 heartPalette = heart_gp;
 
 // Wi-Fi credentials (stored in arduino_secrets.h)
 char ssid[] = SECRET_SSID;
@@ -30,7 +38,7 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);  // UTC time, update eve
 // Web server on port 80
 WiFiServer server(80);
 
-// Zigzag XY mapping function for the 8x32 matrix
+// XY mapping function for the 8x32 matrix
 uint16_t XY(uint8_t x, uint8_t y) {
   if (x >= MATRIX_WIDTH || y >= MATRIX_HEIGHT) {
     return NUM_LEDS; // Return invalid index
@@ -44,11 +52,10 @@ uint16_t XY(uint8_t x, uint8_t y) {
 }
 
 // Helper function to set pixels safely
-void setPixel(uint8_t x, uint8_t y, CRGB color, uint8_t brightness = 255) {
+void setPixel(uint8_t x, uint8_t y, CRGB color) {
   uint16_t index = XY(x, y);
   if (index < NUM_LEDS) {
     leds[index] = color;
-    leds[index].nscale8_video(brightness);
   }
 }
 
@@ -153,9 +160,8 @@ bool drawShootingStar();
 void updateTime();
 void displayClock();
 bool shouldUpdateClock();
-bool shouldUpdateShapes();
 void sendHTMLContent(WiFiClient &client, const char *data);
-CRGB getShapeColor();
+void drawHeartWithHeartbeat();
 
 void setup() {
   Serial.begin(115200);
@@ -175,17 +181,14 @@ void loop() {
   handleClient();
   updateTime();
 
-  // Update clock display
   if (shouldUpdateClock()) {
     displayClock();
     displayUpdated = true;
   }
 
-  // Update shapes
-  if (shouldUpdateShapes()) {
-    drawShapes();
-    displayUpdated = true;
-  }
+  // Update shapes every loop for smooth animations
+  drawShapes();
+  displayUpdated = true;
 
   // Update shooting star
   if (drawShootingStar()) {
@@ -217,74 +220,52 @@ void setupWiFi() {
 void handleClient() {
   WiFiClient client = server.available();
   if (client) {
-    char httpRequest[500] = {0}; // Adjust size as needed
-    int index = 0;
-    unsigned long startTime = millis();
+    String request = client.readStringUntil('\r');
+    client.flush();
 
-    while (client.connected() && millis() - startTime < 1000) { // Timeout after 1 second
-      if (client.available()) {
-        char c = client.read();
-        if (index < sizeof(httpRequest) - 1) {
-          httpRequest[index++] = c;
+    // Process GET parameters
+    if (request.startsWith("GET /")) {
+      int colorIndex = request.indexOf("color=");
+      int brightnessIndex = request.indexOf("brightness=");
+
+      if (colorIndex != -1) {
+        String colorValueStr = request.substring(colorIndex + 6, colorIndex + 12);
+        uint32_t colorValue = (uint32_t) strtol(colorValueStr.c_str(), NULL, 16);
+        uint8_t r = (colorValue >> 16) & 0xFF;
+        uint8_t g = (colorValue >> 8) & 0xFF;
+        uint8_t b = colorValue & 0xFF;
+        globalColor = CRGB(r, g, b);
+      }
+
+      if (brightnessIndex != -1) {
+        int ampersandIndex = request.indexOf('&', brightnessIndex);
+        String brightnessValueStr;
+        if (ampersandIndex != -1) {
+          brightnessValueStr = request.substring(brightnessIndex + 11, ampersandIndex);
+        } else {
+          brightnessValueStr = request.substring(brightnessIndex + 11);
         }
-
-        if (c == '\n') {
-          httpRequest[index] = '\0';
-          // Process the request here
-          if (strstr(httpRequest, "GET /") != NULL) {
-            // Parse GET parameters
-            char *colorParam = strstr(httpRequest, "color=");
-            char *brightnessParam = strstr(httpRequest, "brightness=");
-
-            if (colorParam != NULL) {
-              char colorValueStr[7] = {0};
-              strncpy(colorValueStr, colorParam + 6, 6);
-              colorValueStr[6] = '\0'; // Ensure null-terminated
-              uint32_t colorValue = strtoul(colorValueStr, NULL, 16);
-              uint8_t r = (colorValue >> 16) & 0xFF;
-              uint8_t g = (colorValue >> 8) & 0xFF;
-              uint8_t b = colorValue & 0xFF;
-              globalColor = CRGB(r, g, b);
-              CHSV hsv = rgb2hsv_approximate(globalColor);
-              globalHue = hsv.hue;
-              globalSaturation = hsv.sat;
-            }
-
-            if (brightnessParam != NULL) {
-              int brightnessValue = atoi(brightnessParam + 11);
-              globalBrightness = constrain(brightnessValue, 0, 255);
-              FastLED.setBrightness(globalBrightness);
-            }
-          }
-
-          // Send HTTP response
-          client.println(F("HTTP/1.1 200 OK"));
-          client.println(F("Content-Type: text/html"));
-          client.println(F("Connection: close"));
-          client.println();
-
-          // Send HTML content from PROGMEM
-          sendHTMLContent(client, index_html);
-
-          break;
-        }
+        int brightnessValue = brightnessValueStr.toInt();
+        globalBrightness = constrain(brightnessValue, 0, 255);
+        FastLED.setBrightness(globalBrightness);
       }
     }
+
+    // Send HTTP response
+    client.println(F("HTTP/1.1 200 OK"));
+    client.println(F("Content-Type: text/html"));
+    client.println(F("Connection: close"));
+    client.println();
+    sendHTMLContent(client, index_html);
+
     client.stop();
   }
 }
 
+// Corrected sendHTMLContent() function
 void sendHTMLContent(WiFiClient &client, const char *data) {
-  char buffer[128]; // Adjust buffer size as needed
-  uint16_t index = 0;
-  uint16_t dataLength = strlen_P(data);
-  while (index < dataLength) {
-    uint16_t chunkSize = min((uint16_t)(sizeof(buffer) - 1), (uint16_t)(dataLength - index));
-    memcpy_P(buffer, data + index, chunkSize);
-    buffer[chunkSize] = '\0';
-    client.print(buffer);
-    index += chunkSize;
-  }
+  // Send data stored in PROGMEM to the client
+  client.print(reinterpret_cast<const __FlashStringHelper *>(data));
 }
 
 void updateNTPTime() {
@@ -340,63 +321,104 @@ void drawShapes() {
     shapeIndex = (shapeIndex + 1) % 3; // Cycle through shapes
   }
 
-  // Use dynamic color for shapes
-  CRGB color = getShapeColor();
-
   switch (shapeIndex) {
     case 0:
-      writeShape(26, R_shape, color);
+      // R shape with normal color
+      writeShape(26, R_shape, globalColor);
       break;
     case 1:
-      writeShape(26, Heart_shape, color);
+      // Heart shape with heartbeat effect
+      drawHeartWithHeartbeat();
       break;
     case 2:
-      writeShape(26, J_shape, color);
+      // J shape with normal color
+      writeShape(26, J_shape, globalColor);
       break;
   }
 }
 
-CRGB getShapeColor() {
-  static uint8_t hue = 0;
-  hue += 2; // Adjust the increment to control the speed of the fade
-  return CHSV(hue, 255, 255); // Set brightness (value) to maximum
+void drawHeartWithHeartbeat() {
+  static unsigned long lastUpdate = 0;
+  static float brightness = 150.0;
+  static bool increasing = true;
+  unsigned long currentMillis = millis();
+
+  // Heartbeat interval
+  if (currentMillis - lastUpdate >= 30) { // Adjust for speed
+    lastUpdate = currentMillis;
+
+    // Simulate heartbeat (pulsing brightness)
+    if (increasing) {
+      brightness += 5;
+      if (brightness >= 255) {
+        brightness = 255;
+        increasing = false;
+      }
+    } else {
+      brightness -= 5;
+      if (brightness <= 150) {
+        brightness = 150;
+        increasing = true;
+      }
+    }
+  }
+
+  uint8_t scaledBrightness = (uint8_t)brightness;
+
+  // Apply the brightness to the heart shape
+  for (int row = 0; row < 8; row++) {
+    for (int col = 0; col < 6; col++) {
+      uint8_t pixel = pgm_read_byte(&(Heart_shape[row][col]));
+      if (pixel) {
+        int matrix_col = 26 + col;
+        if (matrix_col < MATRIX_WIDTH) {
+          // Get color from heart palette
+          uint8_t colorIndex = map(row, 0, 7, 0, 255); // Vary color by row
+          CRGB color = ColorFromPalette(heartPalette, colorIndex);
+          color.nscale8_video(scaledBrightness); // Apply brightness scaling
+          setPixel(matrix_col, row, color);
+        }
+      }
+    }
+  }
 }
 
 bool drawShootingStar() {
   static unsigned long previousMillis = 0;   // Stores last time shooting star was updated
-  static float position = -5.0;              // Start from left outside the matrix
-  const float speed = 0.5;                   // Adjust speed as needed
+  static float positionX = -10.0;            // Start from left outside the matrix
+  const float speedX = 0.7;                  // Adjust speed as needed
   const int interval = 50;                   // Time between steps in milliseconds
   bool updated = false;
   unsigned long currentMillis = millis();
 
   // Fade only the area of the shooting star
-  for (int i = 0; i < MATRIX_WIDTH; i++) {
-    CRGB pixelColor = leds[XY(i, 7)];
-    pixelColor.nscale8(200); // Fade by a factor
-    leds[XY(i, 7)] = pixelColor;
+  for (int x = 0; x < MATRIX_WIDTH; x++) {
+    CRGB pixelColor = leds[XY(x, 7)];
+    pixelColor.nscale8(250); // Slight fade
+    leds[XY(x, 7)] = pixelColor;
   }
 
   if (currentMillis - previousMillis >= interval) {
     previousMillis = currentMillis;
 
-    position += speed;
+    positionX += speedX;
 
-    if (position < MATRIX_WIDTH) {
-      int pos = (int)position;
+    if (positionX < MATRIX_WIDTH + 10) {
+      int posX = (int)positionX;
       // Create a trail with decreasing brightness and changing colors
-      for (int i = 0; i < 5; i++) { // Adjust the length of the trail
-        int trailPos = pos - i;
-        if (trailPos >= 0 && trailPos < MATRIX_WIDTH) {
-          uint8_t colorIndex = map(i, 0, 4, 128, 255); // Adjust color index for palette
+      for (int i = 0; i < 20; i++) { // Adjust the length of the trail
+        int trailPosX = posX - i;
+        if (trailPosX >= 0 && trailPosX < MATRIX_WIDTH) {
+          uint8_t colorIndex = map(i, 0, 19, 128, 255); // Adjust color index for palette
           CRGB color = ColorFromPalette(firePalette, colorIndex);
-          color.nscale8(255 - (i * 50)); // Decrease brightness for the trail
-          setPixel(trailPos, 7, color);
+          uint8_t brightness = map(i, 0, 19, 255, 50); // Decrease brightness per step
+          color.nscale8_video(brightness);
+          setPixel(trailPosX, 7, color);
         }
       }
       updated = true;
     } else {
-      position = -5.0; // Reset position for next shooting star
+      positionX = -10.0; // Reset position for next shooting star
     }
   }
   return updated;
@@ -409,7 +431,7 @@ void writeShape(int start_col, const uint8_t shape[8][6], CRGB color) {
       if (pixel) {
         int matrix_col = start_col + col;
         if (matrix_col < MATRIX_WIDTH) {
-          setPixel(matrix_col, row, color, 255); // Set brightness to maximum
+          setPixel(matrix_col, row, color);
         }
       }
     }
@@ -476,9 +498,4 @@ bool shouldUpdateClock() {
     return true;
   }
   return false;
-}
-
-bool shouldUpdateShapes() {
-  // We update shapes every time to allow for smooth color transitions
-  return true;
 }
