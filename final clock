@@ -27,13 +27,13 @@ char ssid[] = SECRET_SSID;
 char pass[] = SECRET_PASS;
 
 // Timezone rules for Pacific Time (USA)
-TimeChangeRule PDT = {"PDT", Second, Sun, Mar, 2, -420};  // Daylight time = UTC - 7 hours
-TimeChangeRule PST = {"PST", First, Sun, Nov, 2, -480};   // Standard time = UTC - 8 hours
+TimeChangeRule PDT = {"PDT", Second, Sun, Mar, 2, -420};  // UTC - 7 hours
+TimeChangeRule PST = {"PST", First, Sun, Nov, 2, -480};   // UTC - 8 hours
 Timezone tz(PDT, PST);
 
 // NTP client to get time
 WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);  // UTC time, update every minute
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);  // UTC time
 
 // Web server on port 80
 WiFiServer server(80);
@@ -41,9 +41,9 @@ WiFiServer server(80);
 // XY mapping function for the 8x32 matrix
 uint16_t XY(uint8_t x, uint8_t y) {
   if (x >= MATRIX_WIDTH || y >= MATRIX_HEIGHT) {
-    return NUM_LEDS; // Return invalid index
+    return NUM_LEDS; // Invalid index
   }
-  // Even columns light top to bottom, odd columns light bottom to top
+  // Even columns light top to bottom, odd columns bottom to top
   if (x % 2 == 0) {
     return (x * MATRIX_HEIGHT) + y;
   } else {
@@ -127,6 +127,15 @@ button { padding: 10px 20px; font-size: 16px; }
 <input type='color' id='color' name='color' value='#FFFFFF'><br><br>
 <label for='brightness'>Brightness:</label><br>
 <input type='range' id='brightness' name='brightness' min='0' max='255' value='50'><br><br>
+<label for='effect'>Select Effect:</label><br>
+<input type='radio' id='effect1' name='effect' value='shooting_star' checked>
+<label for='effect1'>Shooting Star</label><br>
+<input type='radio' id='effect2' name='effect' value='classic_fire'>
+<label for='effect2'>Lava Lamp</label><br>
+<input type='radio' id='effect3' name='effect' value='smooth_fire'>
+<label for='effect3'>Volcano Effect</label><br><br>
+<label for='volcano_color'>Volcano Effect Color:</label><br>
+<input type='color' id='volcano_color' name='volcano_color' value='#FF4500'><br><br>
 <button type='submit'>Update</button>
 </form>
 </body>
@@ -138,13 +147,22 @@ unsigned long previousMillis = 0;
 const long interval = 1000; // Update interval for the clock display
 
 // User-controlled variables
-uint8_t globalHue = 0;          // Hue for the display color
-uint8_t globalSaturation = 255; // Saturation for the display color
 uint8_t globalBrightness = 50;  // Brightness level (0-255)
 CRGB globalColor = CRGB::White; // Default color
+CRGB volcanoColor = CRGB::OrangeRed; // Default volcano effect color
 
-// Fire color palette for the shooting star
+// Fire color palette for the effects
 CRGBPalette16 firePalette = HeatColors_p;
+CRGBPalette16 volcanoPalette;
+
+// Enumerated type for effect selection
+enum EffectType {
+  EFFECT_SHOOTING_STAR,
+  EFFECT_CLASSIC_FIRE,
+  EFFECT_SMOOTH_FIRE
+};
+
+EffectType selectedEffect = EFFECT_SHOOTING_STAR; // Default effect
 
 // Function prototypes
 void displayDigit(int digit, int xOffset, int yOffset, CRGB color);
@@ -162,6 +180,9 @@ void displayClock();
 bool shouldUpdateClock();
 void sendHTMLContent(WiFiClient &client, const char *data);
 void drawHeartWithHeartbeat();
+void drawClassicFire();
+void drawSmoothFire();
+CRGBPalette16 createPalette(CRGB baseColor);
 
 void setup() {
   Serial.begin(115200);
@@ -173,31 +194,39 @@ void setup() {
   Serial.println(F("HTTP server started"));
   Serial.print(F("Access the LED Matrix at: http://"));
   Serial.println(WiFi.localIP());
+
+  // Seed the random number generator
+  randomSeed(analogRead(0));
+
+  // Initialize volcanoPalette
+  volcanoPalette = createPalette(volcanoColor);
 }
 
 void loop() {
-  bool displayUpdated = false;
-
   handleClient();
   updateTime();
 
   if (shouldUpdateClock()) {
     displayClock();
-    displayUpdated = true;
   }
 
-  // Update shapes every loop for smooth animations
+  // Update effect based on selectedEffect
+  switch (selectedEffect) {
+    case EFFECT_SHOOTING_STAR:
+      drawShootingStar();
+      break;
+    case EFFECT_CLASSIC_FIRE:
+      drawClassicFire();
+      break;
+    case EFFECT_SMOOTH_FIRE:
+      drawSmoothFire();
+      break;
+  }
+
+  // Draw shapes after effects
   drawShapes();
-  displayUpdated = true;
 
-  // Update shooting star
-  if (drawShootingStar()) {
-    displayUpdated = true;
-  }
-
-  if (displayUpdated) {
-    FastLED.show();
-  }
+  FastLED.show();
 }
 
 void setupLEDs() {
@@ -220,34 +249,97 @@ void setupWiFi() {
 void handleClient() {
   WiFiClient client = server.available();
   if (client) {
-    String request = client.readStringUntil('\r');
-    client.flush();
+    String request = client.readStringUntil('\n');
+    request.trim();
+    Serial.print("Request: ");
+    Serial.println(request);
 
     // Process GET parameters
     if (request.startsWith("GET /")) {
-      int colorIndex = request.indexOf("color=");
-      int brightnessIndex = request.indexOf("brightness=");
+      int paramsStartIndex = request.indexOf('?');
+      int paramsEndIndex = request.indexOf(' ', paramsStartIndex);
+      if (paramsStartIndex != -1 && paramsEndIndex != -1) {
+        String params = request.substring(paramsStartIndex + 1, paramsEndIndex);
+        Serial.print("Params: ");
+        Serial.println(params);
 
-      if (colorIndex != -1) {
-        String colorValueStr = request.substring(colorIndex + 6, colorIndex + 12);
-        uint32_t colorValue = (uint32_t) strtol(colorValueStr.c_str(), NULL, 16);
-        uint8_t r = (colorValue >> 16) & 0xFF;
-        uint8_t g = (colorValue >> 8) & 0xFF;
-        uint8_t b = colorValue & 0xFF;
-        globalColor = CRGB(r, g, b);
-      }
+        // Split parameters
+        while (params.length() > 0) {
+          int ampIndex = params.indexOf('&');
+          String paramPair;
+          if (ampIndex != -1) {
+            paramPair = params.substring(0, ampIndex);
+            params = params.substring(ampIndex + 1);
+          } else {
+            paramPair = params;
+            params = "";
+          }
 
-      if (brightnessIndex != -1) {
-        int ampersandIndex = request.indexOf('&', brightnessIndex);
-        String brightnessValueStr;
-        if (ampersandIndex != -1) {
-          brightnessValueStr = request.substring(brightnessIndex + 11, ampersandIndex);
-        } else {
-          brightnessValueStr = request.substring(brightnessIndex + 11);
+          int equalsIndex = paramPair.indexOf('=');
+          if (equalsIndex != -1) {
+            String paramName = paramPair.substring(0, equalsIndex);
+            String paramValue = paramPair.substring(equalsIndex + 1);
+
+            paramName.trim();
+            paramValue.trim();
+
+            Serial.print("Param Name: ");
+            Serial.println(paramName);
+            Serial.print("Param Value: ");
+            Serial.println(paramValue);
+
+            if (paramName == "color") {
+              paramValue.trim();
+              paramValue.replace("%23", ""); // Remove URL-encoded '#'
+              if (paramValue.length() >= 6) {
+                String colorValueStr = paramValue.substring(0, 6);
+                uint32_t colorValue = (uint32_t) strtol(colorValueStr.c_str(), NULL, 16);
+                uint8_t r = (colorValue >> 16) & 0xFF;
+                uint8_t g = (colorValue >> 8) & 0xFF;
+                uint8_t b = colorValue & 0xFF;
+                globalColor = CRGB(r, g, b);
+
+                // Prevent globalColor from being black
+                if (globalColor == CRGB::Black) {
+                  globalColor = CRGB::White; // Default to white
+                }
+                Serial.print("Updated globalColor to: ");
+                Serial.print(r); Serial.print(", ");
+                Serial.print(g); Serial.print(", ");
+                Serial.println(b);
+              }
+            } else if (paramName == "brightness") {
+              int brightnessValue = paramValue.toInt();
+              globalBrightness = constrain(brightnessValue, 0, 255);
+              FastLED.setBrightness(globalBrightness);
+            } else if (paramName == "effect") {
+              if (paramValue == "shooting_star") {
+                selectedEffect = EFFECT_SHOOTING_STAR;
+              } else if (paramValue == "classic_fire") {
+                selectedEffect = EFFECT_CLASSIC_FIRE;
+              } else if (paramValue == "smooth_fire") {
+                selectedEffect = EFFECT_SMOOTH_FIRE;
+              }
+            } else if (paramName == "volcano_color") {
+              paramValue.trim();
+              paramValue.replace("%23", "");
+              if (paramValue.length() >= 6) {
+                String colorValueStr = paramValue.substring(0, 6);
+                uint32_t colorValue = (uint32_t) strtol(colorValueStr.c_str(), NULL, 16);
+                uint8_t r = (colorValue >> 16) & 0xFF;
+                uint8_t g = (colorValue >> 8) & 0xFF;
+                uint8_t b = colorValue & 0xFF;
+                volcanoColor = CRGB(r, g, b);
+                // Update the volcanoPalette with the new color
+                volcanoPalette = createPalette(volcanoColor);
+                Serial.print("Updated volcanoColor to: ");
+                Serial.print(r); Serial.print(", ");
+                Serial.print(g); Serial.print(", ");
+                Serial.println(b);
+              }
+            }
+          }
         }
-        int brightnessValue = brightnessValueStr.toInt();
-        globalBrightness = constrain(brightnessValue, 0, 255);
-        FastLED.setBrightness(globalBrightness);
       }
     }
 
@@ -262,7 +354,6 @@ void handleClient() {
   }
 }
 
-// Corrected sendHTMLContent() function
 void sendHTMLContent(WiFiClient &client, const char *data) {
   // Send data stored in PROGMEM to the client
   client.print(reinterpret_cast<const __FlashStringHelper *>(data));
@@ -276,7 +367,7 @@ void updateTime() {
   static unsigned long lastNTPUpdate = 0;
   unsigned long currentMillis = millis();
 
-  if ((currentMillis - lastNTPUpdate >= 600000) || lastNTPUpdate == 0) { // Update every 10 minutes or on startup
+  if ((currentMillis - lastNTPUpdate >= 600000) || lastNTPUpdate == 0) {
     lastNTPUpdate = currentMillis;
     updateNTPTime();
   }
@@ -297,10 +388,7 @@ void displayClock() {
   int second = tm.Second;
 
   // Use globalColor for clock display
-  CRGB color = globalColor;
-
-  // Display the time
-  displayTime(hour, minute, second % 2 == 0, color);
+  displayTime(hour, minute, second % 2 == 0, globalColor);
 }
 
 void drawShapes() {
@@ -323,7 +411,7 @@ void drawShapes() {
 
   switch (shapeIndex) {
     case 0:
-      // R shape with normal color
+      // R shape with globalColor
       writeShape(26, R_shape, globalColor);
       break;
     case 1:
@@ -331,7 +419,7 @@ void drawShapes() {
       drawHeartWithHeartbeat();
       break;
     case 2:
-      // J shape with normal color
+      // J shape with globalColor
       writeShape(26, J_shape, globalColor);
       break;
   }
@@ -347,7 +435,7 @@ void drawHeartWithHeartbeat() {
   if (currentMillis - lastUpdate >= 30) { // Adjust for speed
     lastUpdate = currentMillis;
 
-    // Simulate heartbeat (pulsing brightness)
+    // Simulate heartbeat
     if (increasing) {
       brightness += 5;
       if (brightness >= 255) {
@@ -365,7 +453,7 @@ void drawHeartWithHeartbeat() {
 
   uint8_t scaledBrightness = (uint8_t)brightness;
 
-  // Apply the brightness to the heart shape
+  // Apply brightness to heart shape
   for (int row = 0; row < 8; row++) {
     for (int col = 0; col < 6; col++) {
       uint8_t pixel = pgm_read_byte(&(Heart_shape[row][col]));
@@ -384,18 +472,18 @@ void drawHeartWithHeartbeat() {
 }
 
 bool drawShootingStar() {
-  static unsigned long previousMillis = 0;   // Stores last time shooting star was updated
-  static float positionX = -10.0;            // Start from left outside the matrix
-  const float speedX = 0.7;                  // Adjust speed as needed
-  const int interval = 50;                   // Time between steps in milliseconds
-  bool updated = false;
+  static unsigned long previousMillis = 0; // Last update time
+  static float positionX = -5.0;           // Start outside the matrix
+  const float speedX = 0.5;                // Adjust speed
+  const int interval = 30;                 // Time between steps
+
   unsigned long currentMillis = millis();
 
-  // Fade only the area of the shooting star
+  // Fade the bottom row
   for (int x = 0; x < MATRIX_WIDTH; x++) {
-    CRGB pixelColor = leds[XY(x, 7)];
-    pixelColor.nscale8(250); // Slight fade
-    leds[XY(x, 7)] = pixelColor;
+    CRGB pixelColor = leds[XY(x, MATRIX_HEIGHT - 1)];
+    pixelColor.nscale8(200); // Slight fade
+    leds[XY(x, MATRIX_HEIGHT - 1)] = pixelColor;
   }
 
   if (currentMillis - previousMillis >= interval) {
@@ -403,25 +491,95 @@ bool drawShootingStar() {
 
     positionX += speedX;
 
-    if (positionX < MATRIX_WIDTH + 10) {
+    if (positionX < MATRIX_WIDTH + 5) {
       int posX = (int)positionX;
-      // Create a trail with decreasing brightness and changing colors
-      for (int i = 0; i < 20; i++) { // Adjust the length of the trail
+      // Create trail with decreasing brightness
+      int trailLength = 6; // Trail length
+      for (int i = 0; i < trailLength; i++) {
         int trailPosX = posX - i;
         if (trailPosX >= 0 && trailPosX < MATRIX_WIDTH) {
-          uint8_t colorIndex = map(i, 0, 19, 128, 255); // Adjust color index for palette
+          // Adjust color index
+          uint8_t colorIndex = map(i, 0, trailLength - 1, 255, 180);
+
           CRGB color = ColorFromPalette(firePalette, colorIndex);
-          uint8_t brightness = map(i, 0, 19, 255, 50); // Decrease brightness per step
+
+          // Adjust brightness
+          uint8_t brightness = map(i, 0, trailLength - 1, 255, 50);
           color.nscale8_video(brightness);
-          setPixel(trailPosX, 7, color);
+
+          // Twinkle effect on head
+          if (i == 0) {
+            uint8_t twinkleBrightness = random8(200, 255);
+            color.nscale8_video(twinkleBrightness);
+          }
+
+          setPixel(trailPosX, MATRIX_HEIGHT - 1, color);
         }
       }
-      updated = true;
     } else {
-      positionX = -10.0; // Reset position for next shooting star
+      positionX = -5.0; // Reset position
     }
   }
-  return updated;
+  return true;
+}
+
+void drawClassicFire() {
+  // Fire effect parameters
+  const uint8_t Cooling = 55;
+  const uint8_t Sparking = 120;
+
+  // Static array for row 7
+  static byte heatClassicRow[MATRIX_WIDTH];
+
+  // Cool down cells
+  for (int x = 0; x < MATRIX_WIDTH; x++) {
+    heatClassicRow[x] = qsub8(heatClassicRow[x],
+                      random8(0, ((Cooling * 10) / MATRIX_HEIGHT) + 2));
+  }
+
+  // Ignite new sparks
+  for (int x = 0; x < MATRIX_WIDTH; x++) {
+    if (random8() < Sparking) {
+      heatClassicRow[x] = qadd8(heatClassicRow[x], random8(160, 255));
+    }
+  }
+
+  // Map heat to colors
+  for (int x = 0; x < MATRIX_WIDTH; x++) {
+    byte colorIndex = scale8(heatClassicRow[x], 240);
+    CRGB color = ColorFromPalette(volcanoPalette, colorIndex);
+    setPixel(x, MATRIX_HEIGHT - 1, color);
+  }
+}
+
+void drawSmoothFire() {
+  // Fire effect parameters
+  const float Cooling = 0.5;        // Cooling rate
+  const float IgnitionRate = 0.02;  // Ignition probability
+
+  // Static array for row 7
+  static float temperaturesSmoothRow[MATRIX_WIDTH];
+  static unsigned long lastDrawTime = 0;
+
+  unsigned long currentTime = millis();
+  float elapsedTime = (currentTime - lastDrawTime) / 1000.0;
+  lastDrawTime = currentTime;
+
+  for (int x = 0; x < MATRIX_WIDTH; x++) {
+    // Cool down the cell
+    temperaturesSmoothRow[x] = max(0.0f,
+      temperaturesSmoothRow[x] - Cooling * elapsedTime);
+
+    // Random ignition
+    if (random(1000) < (IgnitionRate * 1000 * elapsedTime)) {
+      temperaturesSmoothRow[x] = 1.0f;
+    }
+
+    // Map temperature to color
+    byte colorIndex = (byte)(temperaturesSmoothRow[x] * 240);
+    CRGB color = ColorFromPalette(volcanoPalette, colorIndex);
+    setPixel(x, MATRIX_HEIGHT - 1, color);
+  }
 }
 
 void writeShape(int start_col, const uint8_t shape[8][6], CRGB color) {
@@ -444,16 +602,18 @@ void displayDigit(int digit, int xOffset, int yOffset, CRGB color) {
     for (uint8_t y = 0; y < 7; y++) {
       if (col & (1 << y)) {
         setPixel(x + xOffset, y + yOffset, color);
+      } else {
+        // Clear the pixel if necessary
+        setPixel(x + xOffset, y + yOffset, CRGB::Black);
       }
-      // Do not set pixels to black here to prevent blinking
     }
   }
 }
 
 void displayColon(int xOffset, int yOffset, bool showColon, CRGB color) {
   if (showColon) {
-    setPixel(xOffset, yOffset + 2, color);  // Upper dot of colon
-    setPixel(xOffset, yOffset + 4, color);  // Lower dot of colon
+    setPixel(xOffset, yOffset + 2, color);  // Upper dot
+    setPixel(xOffset, yOffset + 4, color);  // Lower dot
   } else {
     setPixel(xOffset, yOffset + 2, CRGB::Black);
     setPixel(xOffset, yOffset + 4, CRGB::Black);
@@ -473,11 +633,11 @@ void displayTime(int hour, int minute, bool showColon, CRGB color) {
   int minuteTens = minute / 10;
   int minuteUnits = minute % 10;
 
-  // Display digits with spacing
+  // Display digits
   if (hourTens > 0) {
     displayDigit(hourTens, 0, 0, color);
   } else {
-    // Clear leading zero if hour is single digit
+    // Clear leading zero
     for (int x = 0; x < 5; x++) {
       for (int y = 0; y < 7; y++) {
         setPixel(x, y, CRGB::Black);
@@ -498,4 +658,14 @@ bool shouldUpdateClock() {
     return true;
   }
   return false;
+}
+
+CRGBPalette16 createPalette(CRGB baseColor) {
+  CRGBPalette16 customPalette;
+  for (int i = 0; i < 16; i++) {
+    uint8_t brightness = map(i, 0, 15, 0, 255);
+    customPalette[i] = baseColor;
+    customPalette[i].nscale8(brightness);
+  }
+  return customPalette;
 }
