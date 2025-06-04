@@ -108,10 +108,10 @@ bool isDSTActive(unsigned long epochTime) {
 
   // Handle March (start of DST) and November (end of DST)
   if (month == 3) {  // DST starts at 2 AM on the second Sunday of March
-    int secondSunday = 14 - weekday;
+    int secondSunday = 8 + (7 - weekday) % 7;  // Calculate actual date
     return (day >= secondSunday);
   } else if (month == 11) {  // DST ends at 2 AM on the first Sunday of November
-    int firstSunday = 7 - weekday;
+    int firstSunday = 1 + (7 - weekday) % 7;   // Calculate actual date
     return (day < firstSunday || (day == firstSunday && hour < 2));
   }
   return false;
